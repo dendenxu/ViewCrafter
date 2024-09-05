@@ -16,6 +16,7 @@ def disabled_train(self, mode=True):
     does not change anymore."""
     return self
 
+
 def zero_module(module):
     """
     Zero out the parameters of a module and return it.
@@ -23,6 +24,7 @@ def zero_module(module):
     for p in module.parameters():
         p.detach().zero_()
     return module
+
 
 def scale_module(module, scale):
     """

@@ -207,7 +207,7 @@ class FrozenOpenCLIPEmbedder(AbstractEncoder):
             param.requires_grad = False
 
     def forward(self, text):
-        tokens = open_clip.tokenize(text) ## all clip models use 77 as context length
+        tokens = open_clip.tokenize(text)  # all clip models use 77 as context length
         z = self.encode_with_transformer(tokens.to(self.device))
         return z
 
@@ -276,7 +276,7 @@ class FrozenOpenCLIPImageEmbedder(AbstractEncoder):
         self.model = self.model.eval()
         for param in self.model.parameters():
             param.requires_grad = False
-    
+
     @autocast
     def forward(self, image, no_dropout=False):
         z = self.encode_with_vision_transformer(image)
@@ -291,6 +291,7 @@ class FrozenOpenCLIPImageEmbedder(AbstractEncoder):
 
     def encode(self, text):
         return self(text)
+
 
 class FrozenOpenCLIPImageEmbedderV2(AbstractEncoder):
     """
@@ -318,7 +319,6 @@ class FrozenOpenCLIPImageEmbedderV2(AbstractEncoder):
         self.register_buffer('mean', torch.Tensor([0.48145466, 0.4578275, 0.40821073]), persistent=False)
         self.register_buffer('std', torch.Tensor([0.26862954, 0.26130258, 0.27577711]), persistent=False)
 
-
     def preprocess(self, x):
         # normalize to [0,1]
         x = kornia.geometry.resize(x, (224, 224),
@@ -334,8 +334,8 @@ class FrozenOpenCLIPImageEmbedderV2(AbstractEncoder):
         for param in self.model.parameters():
             param.requires_grad = False
 
-    def forward(self, image, no_dropout=False): 
-        ## image: b c h w
+    def forward(self, image, no_dropout=False):
+        # image: b c h w
         z = self.encode_with_vision_transformer(image)
         return z
 
@@ -370,6 +370,7 @@ class FrozenOpenCLIPImageEmbedderV2(AbstractEncoder):
         x = x.permute(1, 0, 2)  # LND -> NLD
 
         return x
+
 
 class FrozenCLIPT5Encoder(AbstractEncoder):
     def __init__(self, clip_version="openai/clip-vit-large-patch14", t5_version="google/t5-v1_1-xl", device="cuda",

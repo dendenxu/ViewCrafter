@@ -1,3 +1,23 @@
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+from dust3r.utils.device import to_numpy
+import sys
+from scipy.spatial.transform import Slerp
+from scipy.spatial.transform import Rotation as R
+from scipy.interpolate import UnivariateSpline
+from scipy.interpolate import interp1d
+import copy
+from torchvision.transforms import ToPILImage
+import torch.nn.functional as F
+import imageio
+from pytorch3d.renderer import (
+    PointsRasterizationSettings,
+    PointsRenderer,
+    PointsRasterizer,
+    AlphaCompositor,
+    PerspectiveCameras,
+)
+from torchvision.utils import save_image
 import trimesh
 import torch
 import numpy as np
@@ -11,51 +31,33 @@ import pytorch3d
 import random
 from PIL import ImageGrab
 torchvision
-from torchvision.utils import save_image
-from pytorch3d.renderer import (
-    PointsRasterizationSettings,
-    PointsRenderer,
-    PointsRasterizer,
-    AlphaCompositor,
-    PerspectiveCameras,
-)
-import imageio
-import torch.nn.functional as F
-from torchvision.transforms import ToPILImage
-import copy
-from scipy.interpolate import interp1d
-from scipy.interpolate import UnivariateSpline
-from scipy.spatial.transform import Rotation as R
-from scipy.spatial.transform import Slerp
-import sys
 sys.path.append('./extern/dust3r')
-from dust3r.utils.device import to_numpy
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 
-def save_video(data,images_path,folder=None):
+
+def save_video(data, images_path, folder=None):
     if isinstance(data, np.ndarray):
         tensor_data = (torch.from_numpy(data) * 255).to(torch.uint8)
     elif isinstance(data, torch.Tensor):
         tensor_data = (data.detach().cpu() * 255).to(torch.uint8)
     elif isinstance(data, list):
-        folder = [folder]*len(data)
-        images = [np.array(Image.open(os.path.join(folder_name,path))) for folder_name,path in zip(folder,data)]
+        folder = [folder] * len(data)
+        images = [np.array(Image.open(os.path.join(folder_name, path))) for folder_name, path in zip(folder, data)]
         stacked_images = np.stack(images, axis=0)
         tensor_data = torch.from_numpy(stacked_images).to(torch.uint8)
     torchvision.io.write_video(images_path, tensor_data, fps=8, video_codec='h264', options={'crf': '10'})
 
-def get_input_dict(img_tensor,idx,dtype = torch.float32):
 
-    return {'img':F.interpolate(img_tensor.to(dtype), size=(288, 512), mode='bilinear', align_corners=False), 'true_shape': np.array([[288, 512]], dtype=np.int32), 'idx': idx, 'instance': str(idx), 'img_ori':img_tensor.to(dtype)}
+def get_input_dict(img_tensor, idx, dtype=torch.float32):
+
+    return {'img': F.interpolate(img_tensor.to(dtype), size=(288, 512), mode='bilinear', align_corners=False), 'true_shape': np.array([[288, 512]], dtype=np.int32), 'idx': idx, 'instance': str(idx), 'img_ori': img_tensor.to(dtype)}
     # return {'img':F.interpolate(img_tensor.to(dtype), size=(288, 512), mode='bilinear', align_corners=False), 'true_shape': np.array([[288, 512]], dtype=np.int32), 'idx': idx, 'instance': str(idx), 'img_ori':ToPILImage()((img_tensor.squeeze(0)+ 1) / 2)}
 
 
-def rotate_theta(c2ws_input, theta, phi, r, device): 
+def rotate_theta(c2ws_input, theta, phi, r, device):
     # theta: 图像的倾角,新的y’轴(位于yoz平面)与y轴的夹角
-    #让相机在以[0,0,depth_avg]为球心的球面上运动,可以先让其在[0,0,0]为球心的球面运动，方便计算旋转矩阵，之后在平移
+    # 让相机在以[0,0,depth_avg]为球心的球面上运动,可以先让其在[0,0,0]为球心的球面运动，方便计算旋转矩阵，之后在平移
     c2ws = copy.deepcopy(c2ws_input)
-    c2ws[:,2, 3] = c2ws[:,2, 3] + r  #将相机坐标系沿着世界坐标系-z方向平移r
+    c2ws[:, 2, 3] = c2ws[:, 2, 3] + r  # 将相机坐标系沿着世界坐标系-z方向平移r
     # 计算旋转向量
     theta = torch.deg2rad(torch.tensor(theta)).to(device)
     phi = torch.deg2rad(torch.tensor(phi)).to(device)
@@ -81,157 +83,162 @@ def rotate_theta(c2ws_input, theta, phi, r, device):
     Rot_mat = R_h.to(device)
 
     c2ws = torch.matmul(Rot_mat, c2ws)
-    c2ws[:,2, 3]= c2ws[:,2, 3] - r #最后减去r,相当于绕着z=|r|为中心旋转
+    c2ws[:, 2, 3] = c2ws[:, 2, 3] - r  # 最后减去r,相当于绕着z=|r|为中心旋转
 
     return c2ws
+
 
 def sphere2pose(c2ws_input, theta, phi, r, device):
     c2ws = copy.deepcopy(c2ws_input)
 
-    #先沿着世界坐标系z轴方向平移再旋转
-    c2ws[:,2,3] += r
+    # 先沿着世界坐标系z轴方向平移再旋转
+    c2ws[:, 2, 3] += r
 
     theta = torch.deg2rad(torch.tensor(theta)).to(device)
     sin_value_x = torch.sin(theta)
     cos_value_x = torch.cos(theta)
     rot_mat_x = torch.tensor([[1, 0, 0, 0],
-                    [0, cos_value_x, -sin_value_x, 0],
-                    [0, sin_value_x, cos_value_x, 0],
-                    [0, 0, 0, 1]]).unsqueeze(0).repeat(c2ws.shape[0],1,1).to(device)
-    
+                              [0, cos_value_x, -sin_value_x, 0],
+                              [0, sin_value_x, cos_value_x, 0],
+                              [0, 0, 0, 1]]).unsqueeze(0).repeat(c2ws.shape[0], 1, 1).to(device)
+
     phi = torch.deg2rad(torch.tensor(phi)).to(device)
     sin_value_y = torch.sin(phi)
     cos_value_y = torch.cos(phi)
     rot_mat_y = torch.tensor([[cos_value_y, 0, sin_value_y, 0],
-                    [0, 1, 0, 0],
-                    [-sin_value_y, 0, cos_value_y, 0],
-                    [0, 0, 0, 1]]).unsqueeze(0).repeat(c2ws.shape[0],1,1).to(device)
-    
-    c2ws = torch.matmul(rot_mat_x,c2ws)
-    c2ws = torch.matmul(rot_mat_y,c2ws)
+                              [0, 1, 0, 0],
+                              [-sin_value_y, 0, cos_value_y, 0],
+                              [0, 0, 0, 1]]).unsqueeze(0).repeat(c2ws.shape[0], 1, 1).to(device)
 
-    return c2ws 
+    c2ws = torch.matmul(rot_mat_x, c2ws)
+    c2ws = torch.matmul(rot_mat_y, c2ws)
 
-def generate_candidate_poses(c2ws_anchor,H,W,fs,c,theta, phi,num_candidates,device):
+    return c2ws
+
+
+def generate_candidate_poses(c2ws_anchor, H, W, fs, c, theta, phi, num_candidates, device):
     # Initialize a camera.
     """
     The camera coordinate sysmte in COLMAP is right-down-forward
     Pytorch3D is left-up-forward
     """
     if num_candidates == 2:
-        thetas = np.array([0,-theta])
-        phis = np.array([phi,phi])
+        thetas = np.array([0, -theta])
+        phis = np.array([phi, phi])
     elif num_candidates == 3:
-        thetas = np.array([0,-theta,theta/2.]) #avoid too many downward
-        phis = np.array([phi,phi,phi])
+        thetas = np.array([0, -theta, theta / 2.])  # avoid too many downward
+        phis = np.array([phi, phi, phi])
     else:
         raise ValueError("NBV mode only supports 2 or 3 candidates per iteration.")
-    
+
     c2ws_list = []
 
-    for th, ph in zip(thetas,phis):
-        c2w_new = sphere2pose(c2ws_anchor, np.float32(th), np.float32(ph), r=None, device= device)
+    for th, ph in zip(thetas, phis):
+        c2w_new = sphere2pose(c2ws_anchor, np.float32(th), np.float32(ph), r=None, device=device)
         c2ws_list.append(c2w_new)
-    c2ws = torch.cat(c2ws_list,dim=0)
+    c2ws = torch.cat(c2ws_list, dim=0)
     num_views = c2ws.shape[0]
 
-    R, T = c2ws[:,:3, :3], c2ws[:,:3, 3:]
-    ## 将dust3r坐标系转成pytorch3d坐标系
-    R = torch.stack([-R[:,:, 0], -R[:,:, 1], R[:,:, 2]], 2) # from RDF to LUF for Rotation
+    R, T = c2ws[:, :3, :3], c2ws[:, :3, 3:]
+    # 将dust3r坐标系转成pytorch3d坐标系
+    R = torch.stack([-R[:, :, 0], -R[:, :, 1], R[:, :, 2]], 2)  # from RDF to LUF for Rotation
     new_c2w = torch.cat([R, T], 2)
-    w2c = torch.linalg.inv(torch.cat((new_c2w, torch.Tensor([[[0,0,0,1]]]).to(device).repeat(new_c2w.shape[0],1,1)),1))
-    R_new, T_new = w2c[:,:3, :3].permute(0,2,1), w2c[:,:3, 3] # convert R to row-major matrix
+    w2c = torch.linalg.inv(torch.cat((new_c2w, torch.Tensor([[[0, 0, 0, 1]]]).to(device).repeat(new_c2w.shape[0], 1, 1)), 1))
+    R_new, T_new = w2c[:, :3, :3].permute(0, 2, 1), w2c[:, :3, 3]  # convert R to row-major matrix
     image_size = ((H, W),)  # (h, w)
     cameras = PerspectiveCameras(focal_length=fs, principal_point=c, in_ndc=False, image_size=image_size, R=R_new, T=T_new, device=device)
-    return cameras,thetas,phis
+    return cameras, thetas, phis
 
-def generate_traj_specified(c2ws_anchor,H,W,fs,c,theta, phi,d_r,frame,device):
+
+def generate_traj_specified(c2ws_anchor, H, W, fs, c, theta, phi, d_r, frame, device):
     # Initialize a camera.
     """
     The camera coordinate sysmte in COLMAP is right-down-forward
     Pytorch3D is left-up-forward
     """
 
-    thetas = np.linspace(0,theta,frame)
-    phis = np.linspace(0,phi,frame)
-    rs = np.linspace(0,d_r*c2ws_anchor[0,2,3].cpu(),frame)
+    thetas = np.linspace(0, theta, frame)
+    phis = np.linspace(0, phi, frame)
+    rs = np.linspace(0, d_r * c2ws_anchor[0, 2, 3].cpu(), frame)
     c2ws_list = []
-    for th, ph, r in zip(thetas,phis,rs):
+    for th, ph, r in zip(thetas, phis, rs):
         c2w_new = sphere2pose(c2ws_anchor, np.float32(th), np.float32(ph), np.float32(r), device)
         c2ws_list.append(c2w_new)
-    c2ws = torch.cat(c2ws_list,dim=0)
+    c2ws = torch.cat(c2ws_list, dim=0)
     num_views = c2ws.shape[0]
 
-    R, T = c2ws[:,:3, :3], c2ws[:,:3, 3:]
-    ## 将dust3r坐标系转成pytorch3d坐标系
-    R = torch.stack([-R[:,:, 0], -R[:,:, 1], R[:,:, 2]], 2) # from RDF to LUF for Rotation
+    R, T = c2ws[:, :3, :3], c2ws[:, :3, 3:]
+    # 将dust3r坐标系转成pytorch3d坐标系
+    R = torch.stack([-R[:, :, 0], -R[:, :, 1], R[:, :, 2]], 2)  # from RDF to LUF for Rotation
     new_c2w = torch.cat([R, T], 2)
-    w2c = torch.linalg.inv(torch.cat((new_c2w, torch.Tensor([[[0,0,0,1]]]).to(device).repeat(new_c2w.shape[0],1,1)),1))
-    R_new, T_new = w2c[:,:3, :3].permute(0,2,1), w2c[:,:3, 3] # convert R to row-major matrix
+    w2c = torch.linalg.inv(torch.cat((new_c2w, torch.Tensor([[[0, 0, 0, 1]]]).to(device).repeat(new_c2w.shape[0], 1, 1)), 1))
+    R_new, T_new = w2c[:, :3, :3].permute(0, 2, 1), w2c[:, :3, 3]  # convert R to row-major matrix
     image_size = ((H, W),)  # (h, w)
     cameras = PerspectiveCameras(focal_length=fs, principal_point=c, in_ndc=False, image_size=image_size, R=R_new, T=T_new, device=device)
-    return cameras,num_views
+    return cameras, num_views
 
-def generate_traj_txt(c2ws_anchor,H,W,fs,c,phi, theta, r,frame,device,viz_traj=False, save_dir = None):
+
+def generate_traj_txt(c2ws_anchor, H, W, fs, c, phi, theta, r, frame, device, viz_traj=False, save_dir=None):
     # Initialize a camera.
     """
     The camera coordinate sysmte in COLMAP is right-down-forward
     Pytorch3D is left-up-forward
     """
 
-    if len(phi)>3:
-        phis = txt_interpolation(phi,frame,mode='smooth')
+    if len(phi) > 3:
+        phis = txt_interpolation(phi, frame, mode='smooth')
         phis[0] = phi[0]
         phis[-1] = phi[-1]
     else:
-        phis = txt_interpolation(phi,frame,mode='linear')
+        phis = txt_interpolation(phi, frame, mode='linear')
 
-    if len(theta)>3:
-        thetas = txt_interpolation(theta,frame,mode='smooth')
+    if len(theta) > 3:
+        thetas = txt_interpolation(theta, frame, mode='smooth')
         thetas[0] = theta[0]
         thetas[-1] = theta[-1]
     else:
-        thetas = txt_interpolation(theta,frame,mode='linear')
-    
-    if len(r) >3:
-        rs = txt_interpolation(r,frame,mode='smooth')
+        thetas = txt_interpolation(theta, frame, mode='linear')
+
+    if len(r) > 3:
+        rs = txt_interpolation(r, frame, mode='smooth')
         rs[0] = r[0]
-        rs[-1] = r[-1]        
+        rs[-1] = r[-1]
     else:
-        rs = txt_interpolation(r,frame,mode='linear')
-    rs = rs*c2ws_anchor[0,2,3].cpu().numpy()
+        rs = txt_interpolation(r, frame, mode='linear')
+    rs = rs * c2ws_anchor[0, 2, 3].cpu().numpy()
 
     c2ws_list = []
-    for th, ph, r in zip(thetas,phis,rs):
+    for th, ph, r in zip(thetas, phis, rs):
         c2w_new = sphere2pose(c2ws_anchor, np.float32(th), np.float32(ph), np.float32(r), device)
         c2ws_list.append(c2w_new)
-    c2ws = torch.cat(c2ws_list,dim=0)
+    c2ws = torch.cat(c2ws_list, dim=0)
 
     if viz_traj:
         poses = c2ws.cpu().numpy()
         # visualizer(poses, os.path.join(save_dir,'viz_traj.png'))
         frames = [visualizer_frame(poses, i) for i in range(len(poses))]
-        save_video(np.array(frames)/255.,os.path.join(save_dir,'viz_traj.mp4'))
+        save_video(np.array(frames) / 255., os.path.join(save_dir, 'viz_traj.mp4'))
 
     num_views = c2ws.shape[0]
 
-    R, T = c2ws[:,:3, :3], c2ws[:,:3, 3:]
-    ## 将dust3r坐标系转成pytorch3d坐标系
-    R = torch.stack([-R[:,:, 0], -R[:,:, 1], R[:,:, 2]], 2) # from RDF to LUF for Rotation
+    R, T = c2ws[:, :3, :3], c2ws[:, :3, 3:]
+    # 将dust3r坐标系转成pytorch3d坐标系
+    R = torch.stack([-R[:, :, 0], -R[:, :, 1], R[:, :, 2]], 2)  # from RDF to LUF for Rotation
     new_c2w = torch.cat([R, T], 2)
-    w2c = torch.linalg.inv(torch.cat((new_c2w, torch.Tensor([[[0,0,0,1]]]).to(device).repeat(new_c2w.shape[0],1,1)),1))
-    R_new, T_new = w2c[:,:3, :3].permute(0,2,1), w2c[:,:3, 3] # convert R to row-major matrix
+    w2c = torch.linalg.inv(torch.cat((new_c2w, torch.Tensor([[[0, 0, 0, 1]]]).to(device).repeat(new_c2w.shape[0], 1, 1)), 1))
+    R_new, T_new = w2c[:, :3, :3].permute(0, 2, 1), w2c[:, :3, 3]  # convert R to row-major matrix
     image_size = ((H, W),)  # (h, w)
     cameras = PerspectiveCameras(focal_length=fs, principal_point=c, in_ndc=False, image_size=image_size, R=R_new, T=T_new, device=device)
-    return cameras,num_views
+    return cameras, num_views
+
 
 def setup_renderer(cameras, image_size):
     # Define the settings for rasterization and shading.
     raster_settings = PointsRasterizationSettings(
         image_size=image_size,
-        radius = 0.01,
-        points_per_pixel = 10,
-        bin_size = 0
+        radius=0.01,
+        points_per_pixel=10,
+        bin_size=0
     )
 
     renderer = PointsRenderer(
@@ -239,20 +246,22 @@ def setup_renderer(cameras, image_size):
         compositor=AlphaCompositor()
     )
 
-    render_setup =  {'cameras': cameras, 'raster_settings': raster_settings, 'renderer': renderer}
+    render_setup = {'cameras': cameras, 'raster_settings': raster_settings, 'renderer': renderer}
 
     return render_setup
 
-def interpolate_sequence(sequence, k,device):
+
+def interpolate_sequence(sequence, k, device):
 
     N, M = sequence.size()
-    weights = torch.linspace(0, 1, k+1).view(1, -1, 1).to(device)
-    left_values = sequence[:-1].unsqueeze(1).repeat(1, k+1, 1)
-    right_values = sequence[1:].unsqueeze(1).repeat(1, k+1, 1)
+    weights = torch.linspace(0, 1, k + 1).view(1, -1, 1).to(device)
+    left_values = sequence[:-1].unsqueeze(1).repeat(1, k + 1, 1)
+    right_values = sequence[1:].unsqueeze(1).repeat(1, k + 1, 1)
     new_sequence = torch.einsum("ijk,ijl->ijl", (1 - weights), left_values) + torch.einsum("ijk,ijl->ijl", weights, right_values)
     new_sequence = new_sequence.reshape(-1, M)
     new_sequence = torch.cat([new_sequence, sequence[-1].view(1, -1)], dim=0)
     return new_sequence
+
 
 def focus_point_fn(c2ws: torch.Tensor) -> torch.Tensor:
     """Calculate nearest point to all focal axes in camera-to-world matrices."""
@@ -263,16 +272,17 @@ def focus_point_fn(c2ws: torch.Tensor) -> torch.Tensor:
     focus_pt = torch.inverse(mt_m.mean(0)) @ (mt_m @ origins).mean(0)[:, 0]
     return focus_pt
 
+
 def generate_camera_path(c2ws: torch.Tensor, n_inserts: int = 15, device='cuda') -> torch.Tensor:
-    n_poses = c2ws.shape[0] 
+    n_poses = c2ws.shape[0]
     interpolated_poses = []
 
-    for i in range(n_poses-1):
+    for i in range(n_poses - 1):
         start_pose = c2ws[i]
         end_pose = c2ws[(i + 1) % n_poses]
-        focus_point = focus_point_fn(torch.stack([start_pose,end_pose]))
+        focus_point = focus_point_fn(torch.stack([start_pose, end_pose]))
         interpolated_path = interpolate_poses(start_pose, end_pose, focus_point, n_inserts, device)
-        
+
         # Exclude the last pose (end_pose) for all pairs
         interpolated_path = interpolated_path[:-1]
 
@@ -281,6 +291,7 @@ def generate_camera_path(c2ws: torch.Tensor, n_inserts: int = 15, device='cuda')
     interpolated_poses.append(c2ws[-1:])
     full_path = torch.cat(interpolated_poses, dim=0)
     return full_path
+
 
 def interpolate_poses(start_pose: torch.Tensor, end_pose: torch.Tensor, focus_point: torch.Tensor, n_inserts: int = 15, device='cuda') -> torch.Tensor:
     dtype = start_pose.dtype
@@ -307,6 +318,7 @@ def interpolate_poses(start_pose: torch.Tensor, end_pose: torch.Tensor, focus_po
     path = torch.stack(inserted_c2ws)
     return path
 
+
 def inv(mat):
     """ Invert a torch or numpy matrix
     """
@@ -316,8 +328,9 @@ def inv(mat):
         return np.linalg.inv(mat)
     raise ValueError(f'bad matrix type = {type(mat)}')
 
+
 def save_pointcloud_with_normals(imgs, pts3d, msk, save_path, mask_pc, reduce_pc):
-    pc = get_pc(imgs, pts3d, msk,mask_pc,reduce_pc)  # Assuming get_pc is defined elsewhere and returns a trimesh point cloud
+    pc = get_pc(imgs, pts3d, msk, mask_pc, reduce_pc)  # Assuming get_pc is defined elsewhere and returns a trimesh point cloud
 
     # Define a default normal, e.g., [0, 1, 0]
     default_normal = [0, 1, 0]
@@ -358,7 +371,7 @@ def get_pc(imgs, pts3d, mask, mask_pc=False, reduce_pc=False):
     imgs = to_numpy(imgs)
     pts3d = to_numpy(pts3d)
     mask = to_numpy(mask)
-    
+
     if mask_pc:
         pts = np.concatenate([p[m] for p, m in zip(pts3d, mask)])
         col = np.concatenate([p[m] for p, m in zip(imgs, mask)])
@@ -372,17 +385,18 @@ def get_pc(imgs, pts3d, mask, mask_pc=False, reduce_pc=False):
     else:
         pts = pts.reshape(-1, 3)
         col = col.reshape(-1, 3)
-    
-    #mock normals:
+
+    # mock normals:
     normals = np.tile([0, 1, 0], (pts.shape[0], 1))
-    
+
     pct = trimesh.PointCloud(pts, colors=col)
     # debug
     # pct.export('output.ply')
     # print('exporting output.ply')
     pct.vertices_normal = normals  # Manually add normals to the point cloud
-    
-    return pct#, pts
+
+    return pct  # , pts
+
 
 def world_to_kth(poses, k):
     # 将世界坐标系转到和第k个pose的相机坐标系一致
@@ -390,6 +404,7 @@ def world_to_kth(poses, k):
     inv_kth_pose = torch.inverse(kth_pose)
     new_poses = torch.bmm(inv_kth_pose.unsqueeze(0).expand_as(poses), poses)
     return new_poses
+
 
 def world_point_to_kth(poses, points, k, device):
     # 将世界坐标系转到和第k个pose的相机坐标系一致,同时处理点云
@@ -399,44 +414,45 @@ def world_point_to_kth(poses, points, k, device):
     new_poses = torch.bmm(inv_kth_pose.unsqueeze(0).expand_as(poses), poses)
     N, W, H, _ = points.shape
     points = points.view(N, W * H, 3)
-    homogeneous_points = torch.cat([points, torch.ones(N, W*H, 1).to(device)], dim=-1)  
-    new_points = inv_kth_pose.unsqueeze(0).expand(N, -1, -1).unsqueeze(1)@ homogeneous_points.unsqueeze(-1)
-    new_points = new_points.squeeze(-1)[...,:3].view(N, W, H, _)
+    homogeneous_points = torch.cat([points, torch.ones(N, W * H, 1).to(device)], dim=-1)
+    new_points = inv_kth_pose.unsqueeze(0).expand(N, -1, -1).unsqueeze(1) @ homogeneous_points.unsqueeze(-1)
+    new_points = new_points.squeeze(-1)[..., :3].view(N, W, H, _)
 
     return new_poses, new_points
 
 
 def world_point_to_obj(poses, points, k, r, elevation, device):
-    ## 作用:将世界坐标系转到object的中心
+    # 作用:将世界坐标系转到object的中心
 
-    ## 先将世界坐标系转到指定相机
+    # 先将世界坐标系转到指定相机
     poses, points = world_point_to_kth(poses, points, k, device)
-    
-    ## 定义目标坐标系位姿, 原点位于object中心(远世界坐标系[0,0,r]),Y轴向上, Z轴垂直屏幕向外, X轴向右
-    elevation_rad = torch.deg2rad(torch.tensor(180-elevation)).to(device)
+
+    # 定义目标坐标系位姿, 原点位于object中心(远世界坐标系[0,0,r]),Y轴向上, Z轴垂直屏幕向外, X轴向右
+    elevation_rad = torch.deg2rad(torch.tensor(180 - elevation)).to(device)
     sin_value_x = torch.sin(elevation_rad)
     cos_value_x = torch.cos(elevation_rad)
     R = torch.tensor([[1, 0, 0,],
-                    [0, cos_value_x, sin_value_x],
-                    [0, -sin_value_x, cos_value_x]]).to(device)
-    
+                      [0, cos_value_x, sin_value_x],
+                      [0, -sin_value_x, cos_value_x]]).to(device)
+
     t = torch.tensor([0, 0, r]).to(device)
     pose_obj = torch.eye(4).to(device)
     pose_obj[:3, :3] = R
     pose_obj[:3, 3] = t
 
-    ## 给所有点和pose乘以目标坐标系的逆(w2c),将它们变换到目标坐标系下
+    # 给所有点和pose乘以目标坐标系的逆(w2c),将它们变换到目标坐标系下
     inv_obj_pose = torch.inverse(pose_obj)
     new_poses = torch.bmm(inv_obj_pose.unsqueeze(0).expand_as(poses), poses)
     N, W, H, _ = points.shape
     points = points.view(N, W * H, 3)
-    homogeneous_points = torch.cat([points, torch.ones(N, W*H, 1).to(device)], dim=-1)  
-    new_points = inv_obj_pose.unsqueeze(0).expand(N, -1, -1).unsqueeze(1)@ homogeneous_points.unsqueeze(-1)
-    new_points = new_points.squeeze(-1)[...,:3].view(N, W, H, _)
-    
+    homogeneous_points = torch.cat([points, torch.ones(N, W * H, 1).to(device)], dim=-1)
+    new_points = inv_obj_pose.unsqueeze(0).expand(N, -1, -1).unsqueeze(1) @ homogeneous_points.unsqueeze(-1)
+    new_points = new_points.squeeze(-1)[..., :3].view(N, W, H, _)
+
     return new_poses, new_points
 
-def txt_interpolation(input_list,n,mode = 'smooth'):
+
+def txt_interpolation(input_list, n, mode='smooth'):
     x = np.linspace(0, 1, len(input_list))
     if mode == 'smooth':
         f = UnivariateSpline(x, input_list, k=3)
@@ -450,6 +466,7 @@ def txt_interpolation(input_list,n,mode = 'smooth'):
     xnew = np.linspace(0, 1, n)
     ynew = f(xnew)
     return ynew
+
 
 def visualizer(camera_poses, save_path="out.png"):
     fig = plt.figure()
@@ -474,6 +491,7 @@ def visualizer(camera_poses, save_path="out.png"):
     # ax.view_init(90+30, -90)
     plt.savefig(save_path)
     plt.close()
+
 
 def visualizer_frame(camera_poses, highlight_index):
     fig = plt.figure()
@@ -506,21 +524,18 @@ def visualizer_frame(camera_poses, highlight_index):
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
     # ax.set_title("Camera trajectory")
-    ax.view_init(90+30, -90)
+    ax.view_init(90 + 30, -90)
 
-    plt.ylim(-0.1,0.2)
+    plt.ylim(-0.1, 0.2)
     fig.canvas.draw()
     width, height = fig.canvas.get_width_height()
-    
+
     img = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8').reshape(height, width, 3)
     # new_width = int(width * 0.6)
     # start_x = (width - new_width) // 2 + new_width // 5
     # end_x = start_x + new_width
     # img = img[:, start_x:end_x, :]
-    
-    
+
     plt.close()
 
     return img
-
-

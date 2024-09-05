@@ -5,6 +5,25 @@ https://github.com/lucidrains/denoising-diffusion-pytorch/blob/7706bdfc6f527f58d
 https://github.com/CompVis/taming-transformers
 -- merci
 """
+from lvdm.common import (
+    extract_into_tensor,
+    noise_like,
+    exists,
+    default
+)
+from lvdm.basics import disabled_train
+from lvdm.models.utils_diffusion import make_beta_schedule, rescale_zero_terminal_snr
+from lvdm.distributions import DiagonalGaussianDistribution
+from lvdm.models.samplers.ddim import DDIMSampler
+from lvdm.ema import LitEma
+from utils.diffusion_utils import instantiate_from_config
+from pytorch_lightning.utilities import rank_zero_only
+import pytorch_lightning as pl
+from torchvision.utils import make_grid
+from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
+import torch.nn as nn
+import torch
+import random
 import re
 from functools import partial
 from contextlib import contextmanager
@@ -13,29 +32,11 @@ from tqdm import tqdm
 from einops import rearrange, repeat
 import logging
 mainlogger = logging.getLogger('mainlogger')
-import random
-import torch
-import torch.nn as nn
-from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
-from torchvision.utils import make_grid
-import pytorch_lightning as pl
-from pytorch_lightning.utilities import rank_zero_only
-from utils.diffusion_utils import instantiate_from_config
-from lvdm.ema import LitEma
-from lvdm.models.samplers.ddim import DDIMSampler
-from lvdm.distributions import DiagonalGaussianDistribution
-from lvdm.models.utils_diffusion import make_beta_schedule, rescale_zero_terminal_snr
-from lvdm.basics import disabled_train
-from lvdm.common import (
-    extract_into_tensor,
-    noise_like,
-    exists,
-    default
-)
 
 __conditioning_keys__ = {'concat': 'c_concat',
                          'crossattn': 'c_crossattn',
                          'adm': 'y'}
+
 
 class DDPM(pl.LightningModule):
     # classic DDPM with Gaussian diffusion, in image space
@@ -84,7 +85,7 @@ class DDPM(pl.LightningModule):
             self.image_size = [self.image_size, self.image_size]
         self.use_positional_encodings = use_positional_encodings
         self.model = DiffusionWrapper(unet_config, conditioning_key)
-        #count_params(self.model, verbose=True)
+        # count_params(self.model, verbose=True)
         self.use_ema = use_ema
         self.rescale_betas_zero_snr = rescale_betas_zero_snr
         if self.use_ema:
@@ -107,7 +108,7 @@ class DDPM(pl.LightningModule):
         self.register_schedule(given_betas=given_betas, beta_schedule=beta_schedule, timesteps=timesteps,
                                linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s)
 
-        ## for reschedule
+        # for reschedule
         self.given_betas = given_betas
         self.beta_schedule = beta_schedule
         self.timesteps = timesteps
@@ -129,7 +130,7 @@ class DDPM(pl.LightningModule):
                                        cosine_s=cosine_s)
         if self.rescale_betas_zero_snr:
             betas = rescale_zero_terminal_snr(betas)
-        
+
         alphas = 1. - betas
         alphas_cumprod = np.cumprod(alphas, axis=0)
         alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
@@ -160,7 +161,7 @@ class DDPM(pl.LightningModule):
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
         posterior_variance = (1 - self.v_posterior) * betas * (1. - alphas_cumprod_prev) / (
-                    1. - alphas_cumprod) + self.v_posterior * betas
+            1. - alphas_cumprod) + self.v_posterior * betas
         # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
         self.register_buffer('posterior_variance', to_torch(posterior_variance))
         # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
@@ -172,12 +173,12 @@ class DDPM(pl.LightningModule):
 
         if self.parameterization == "eps":
             lvlb_weights = self.betas ** 2 / (
-                        2 * self.posterior_variance * to_torch(alphas) * (1 - self.alphas_cumprod))
+                2 * self.posterior_variance * to_torch(alphas) * (1 - self.alphas_cumprod))
         elif self.parameterization == "x0":
             lvlb_weights = 0.5 * np.sqrt(torch.Tensor(alphas_cumprod)) / (2. * 1 - torch.Tensor(alphas_cumprod))
         elif self.parameterization == "v":
             lvlb_weights = torch.ones_like(self.betas ** 2 / (
-                    2 * self.posterior_variance * to_torch(alphas) * (1 - self.alphas_cumprod)))
+                2 * self.posterior_variance * to_torch(alphas) * (1 - self.alphas_cumprod)))
         else:
             raise NotImplementedError("mu not supported")
         # TODO how to choose this term
@@ -232,28 +233,28 @@ class DDPM(pl.LightningModule):
 
     def predict_start_from_noise(self, x_t, t, noise):
         return (
-                extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
-                extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
+            extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
+            extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
 
     def predict_start_from_z_and_v(self, x_t, t, v):
         # self.register_buffer('sqrt_alphas_cumprod', to_torch(np.sqrt(alphas_cumprod)))
         # self.register_buffer('sqrt_one_minus_alphas_cumprod', to_torch(np.sqrt(1. - alphas_cumprod)))
         return (
-                extract_into_tensor(self.sqrt_alphas_cumprod, t, x_t.shape) * x_t -
-                extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * v
+            extract_into_tensor(self.sqrt_alphas_cumprod, t, x_t.shape) * x_t -
+            extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * v
         )
 
     def predict_eps_from_z_and_v(self, x_t, t, v):
         return (
-                extract_into_tensor(self.sqrt_alphas_cumprod, t, x_t.shape) * v +
-                extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * x_t
+            extract_into_tensor(self.sqrt_alphas_cumprod, t, x_t.shape) * v +
+            extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * x_t
         )
 
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = (
-                extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start +
-                extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
+            extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start +
+            extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
         )
         posterior_variance = extract_into_tensor(self.posterior_variance, t, x_t.shape)
         posterior_log_variance_clipped = extract_into_tensor(self.posterior_log_variance_clipped, t, x_t.shape)
@@ -309,8 +310,8 @@ class DDPM(pl.LightningModule):
 
     def get_v(self, x, noise, t):
         return (
-                extract_into_tensor(self.sqrt_alphas_cumprod, t, x.shape) * noise -
-                extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x.shape) * x
+            extract_into_tensor(self.sqrt_alphas_cumprod, t, x.shape) * noise -
+            extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x.shape) * x
         )
 
     def get_loss(self, pred, target, mean=True):
@@ -461,8 +462,10 @@ class DDPM(pl.LightningModule):
         opt = torch.optim.AdamW(params, lr=lr)
         return opt
 
+
 class LatentDiffusion(DDPM):
     """main class"""
+
     def __init__(self,
                  first_stage_config,
                  cond_stage_config,
@@ -529,22 +532,22 @@ class LatentDiffusion(DDPM):
         self.instantiate_first_stage(first_stage_config)
         self.instantiate_cond_stage(cond_stage_config)
         self.first_stage_config = first_stage_config
-        self.cond_stage_config = cond_stage_config        
+        self.cond_stage_config = cond_stage_config
         self.clip_denoised = False
 
         self.cond_stage_forward = cond_stage_forward
         self.encoder_type = encoder_type
-        assert(encoder_type in ["2d", "3d"])
+        assert (encoder_type in ["2d", "3d"])
         self.uncond_prob = uncond_prob
         self.classifier_free_guidance = True if uncond_prob > 0 else False
-        assert(uncond_type in ["zero_embed", "empty_seq"])
+        assert (uncond_type in ["zero_embed", "empty_seq"])
         self.uncond_type = uncond_type
 
         self.restarted_from_ckpt = False
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys, only_model=only_model)
             self.restarted_from_ckpt = True
-                
+
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
         ids = torch.round(torch.linspace(0, self.num_timesteps - 1, self.num_timesteps_cond)).long()
@@ -594,7 +597,7 @@ class LatentDiffusion(DDPM):
         else:
             model = instantiate_from_config(config)
             self.cond_stage_model = model
-    
+
     def get_learned_conditioning(self, c):
         if self.cond_stage_forward is None:
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
@@ -616,7 +619,7 @@ class LatentDiffusion(DDPM):
         else:
             raise NotImplementedError(f"encoder_posterior of type '{type(encoder_posterior)}' not yet implemented")
         return self.scale_factor * z
-   
+
     @torch.no_grad()
     def encode_first_stage(self, x):
         if self.encoder_type == "2d" and x.dim() == 5:
@@ -625,24 +628,24 @@ class LatentDiffusion(DDPM):
             reshape_back = True
         else:
             reshape_back = False
-        
-        ## consume more GPU memory but faster
+
+        # consume more GPU memory but faster
         if not self.perframe_ae:
             encoder_posterior = self.first_stage_model.encode(x)
             results = self.get_first_stage_encoding(encoder_posterior).detach()
-        else:  ## consume less GPU memory but slower
+        else:  # consume less GPU memory but slower
             results = []
             for index in range(x.shape[0]):
-                frame_batch = self.first_stage_model.encode(x[index:index+1,:,:,:])
+                frame_batch = self.first_stage_model.encode(x[index:index + 1, :, :, :])
                 frame_result = self.get_first_stage_encoding(frame_batch).detach()
                 results.append(frame_result)
             results = torch.cat(results, dim=0)
 
         if reshape_back:
-            results = rearrange(results, '(b t) c h w -> b c t h w', b=b,t=t)
-        
+            results = rearrange(results, '(b t) c h w -> b c t h w', b=b, t=t)
+
         return results
-    
+
     def decode_core(self, z, **kwargs):
         if self.encoder_type == "2d" and z.dim() == 5:
             b, _, t, _, _ = z.shape
@@ -650,20 +653,20 @@ class LatentDiffusion(DDPM):
             reshape_back = True
         else:
             reshape_back = False
-            
-        if not self.perframe_ae:    
+
+        if not self.perframe_ae:
             z = 1. / self.scale_factor * z
             results = self.first_stage_model.decode(z, **kwargs)
         else:
             results = []
             for index in range(z.shape[0]):
-                frame_z = 1. / self.scale_factor * z[index:index+1,:,:,:]
+                frame_z = 1. / self.scale_factor * z[index:index + 1, :, :, :]
                 frame_result = self.first_stage_model.decode(frame_z, **kwargs)
                 results.append(frame_result)
             results = torch.cat(results, dim=0)
 
         if reshape_back:
-            results = rearrange(results, '(b t) c h w -> b c t h w', b=b,t=t)
+            results = rearrange(results, '(b t) c h w -> b c t h w', b=b, t=t)
         return results
 
     @torch.no_grad()
@@ -673,16 +676,16 @@ class LatentDiffusion(DDPM):
     # same as above but without decorator
     def differentiable_decode_first_stage(self, z, **kwargs):
         return self.decode_core(z, **kwargs)
-    
+
     @torch.no_grad()
     def get_batch_input(self, batch, random_uncond, return_first_stage_outputs=False, return_original_cond=False):
-        ## video shape: b, c, t, h, w
+        # video shape: b, c, t, h, w
         x = super().get_input(batch, self.first_stage_key)
 
-        ## encode video frames x to z via a 2D encoder
+        # encode video frames x to z via a 2D encoder
         z = self.encode_first_stage(x)
-                
-        ## get caption condition
+
+        # get caption condition
         cond = batch[self.cond_stage_key]
         if random_uncond and self.uncond_type == 'empty_seq':
             for i, ci in enumerate(cond):
@@ -696,9 +699,9 @@ class LatentDiffusion(DDPM):
             for i, ci in enumerate(cond):
                 if random.random() < self.uncond_prob:
                     cond_emb[i] = torch.zeros_like(cond_emb[i])
-        
+
         out = [z, cond_emb]
-        ## optional output: self-reconst or caption
+        # optional output: self-reconst or caption
         if return_first_stage_outputs:
             xrec = self.decode_first_stage(z)
             out.extend([xrec])
@@ -759,7 +762,7 @@ class LatentDiffusion(DDPM):
             target = self.get_v(x_start, noise, t)
         else:
             raise NotImplementedError()
-        
+
         loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3, 4])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
@@ -781,22 +784,22 @@ class LatentDiffusion(DDPM):
         loss += (self.original_elbo_weight * loss_vlb)
         loss_dict.update({f'{prefix}/loss': loss})
 
-        return loss, loss_dict  
+        return loss, loss_dict
 
     def training_step(self, batch, batch_idx):
         loss, loss_dict = self.shared_step(batch, random_uncond=self.classifier_free_guidance)
-        ## sync_dist | rank_zero_only 
+        # sync_dist | rank_zero_only
         self.log_dict(loss_dict, prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=False)
-        #self.log("epoch/global_step", self.global_step.float(), prog_bar=True, logger=True, on_step=True, on_epoch=False)
+        # self.log("epoch/global_step", self.global_step.float(), prog_bar=True, logger=True, on_step=True, on_epoch=False)
         '''
         if self.use_scheduler:
             lr = self.optimizers().param_groups[0]['lr']
             self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False, rank_zero_only=True)
         '''
-        if (batch_idx+1) % self.log_every_t == 0:
+        if (batch_idx + 1) % self.log_every_t == 0:
             mainlogger.info(f"batch:{batch_idx}|epoch:{self.current_epoch} [globalstep:{self.global_step}]: loss={loss}")
         return loss
-    
+
     def _get_denoise_row_from_list(self, samples, desc=''):
         denoise_row = []
         for zd in tqdm(samples, desc=desc):
@@ -804,7 +807,7 @@ class LatentDiffusion(DDPM):
         n_log_timesteps = len(denoise_row)
 
         denoise_row = torch.stack(denoise_row)  # n_log_timesteps, b, C, H, W
-        
+
         if denoise_row.dim() == 5:
             denoise_grid = rearrange(denoise_row, 'n b c h w -> b n c h w')
             denoise_grid = rearrange(denoise_grid, 'b n c h w -> (b n) c h w')
@@ -822,25 +825,24 @@ class LatentDiffusion(DDPM):
         return denoise_grid
 
     @torch.no_grad()
-    def log_images(self, batch, sample=True, ddim_steps=200, ddim_eta=1., plot_denoise_rows=False, \
-                    unconditional_guidance_scale=1.0, **kwargs):
+    def log_images(self, batch, sample=True, ddim_steps=200, ddim_eta=1., plot_denoise_rows=False,
+                   unconditional_guidance_scale=1.0, **kwargs):
         """ log images for LatentDiffusion """
-        ##### control sampled imgae for logging, larger value may cause OOM
+        # control sampled imgae for logging, larger value may cause OOM
         sampled_img_num = 2
         for key in batch.keys():
             batch[key] = batch[key][:sampled_img_num]
 
-        ## TBD: currently, classifier_free_guidance sampling is only supported by DDIM
+        # TBD: currently, classifier_free_guidance sampling is only supported by DDIM
         use_ddim = ddim_steps is not None
         log = dict()
         z, c, xrec, xc = self.get_batch_input(batch, random_uncond=False,
-                                                return_first_stage_outputs=True,
-                                                return_original_cond=True)
+                                              return_first_stage_outputs=True,
+                                              return_original_cond=True)
 
         N = xrec.shape[0]
         log["reconst"] = xrec
         log["condition"] = xc
-        
 
         if sample:
             # get uncond embedding for classifier-free guidance sampling
@@ -856,7 +858,7 @@ class LatentDiffusion(DDPM):
                     uc = self.get_learned_conditioning(prompts)
                 elif self.uncond_type == "zero_embed":
                     uc = torch.zeros_like(c_emb)
-                ## hybrid case
+                # hybrid case
                 if isinstance(c, dict):
                     uc_hybrid = {"c_concat": [c_cat], "c_crossattn": [uc]}
                     uc = uc_hybrid
@@ -865,12 +867,12 @@ class LatentDiffusion(DDPM):
 
             with self.ema_scope("Plotting"):
                 samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
-                                                         ddim_steps=ddim_steps,eta=ddim_eta,
+                                                         ddim_steps=ddim_steps, eta=ddim_eta,
                                                          unconditional_guidance_scale=unconditional_guidance_scale,
                                                          unconditional_conditioning=uc, x0=z, **kwargs)
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
-            
+
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
                 log["denoise_row"] = denoise_grid
@@ -903,10 +905,10 @@ class LatentDiffusion(DDPM):
             return model_mean, posterior_variance, posterior_log_variance
 
     @torch.no_grad()
-    def p_sample(self, x, c, t, clip_denoised=False, repeat_noise=False, return_x0=False, \
+    def p_sample(self, x, c, t, clip_denoised=False, repeat_noise=False, return_x0=False,
                  temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None, **kwargs):
         b, *_, device = *x.shape, x.device
-        outputs = self.p_mean_variance(x=x, c=c, t=t, clip_denoised=clip_denoised, return_x0=return_x0, \
+        outputs = self.p_mean_variance(x=x, c=c, t=t, clip_denoised=clip_denoised, return_x0=return_x0,
                                        score_corrector=score_corrector, corrector_kwargs=corrector_kwargs, **kwargs)
         if return_x0:
             model_mean, _, model_log_variance, x0 = outputs
@@ -925,13 +927,13 @@ class LatentDiffusion(DDPM):
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, cond, shape, return_intermediates=False, x_T=None, verbose=True, callback=None, \
+    def p_sample_loop(self, cond, shape, return_intermediates=False, x_T=None, verbose=True, callback=None,
                       timesteps=None, mask=None, x0=None, img_callback=None, start_T=None, log_every_t=None, **kwargs):
 
         if not log_every_t:
             log_every_t = self.log_every_t
         device = self.betas.device
-        b = shape[0]        
+        b = shape[0]
         # sample an initial noise
         if x_T is None:
             img = torch.randn(shape, device=device)
@@ -972,14 +974,14 @@ class LatentDiffusion(DDPM):
         return img
 
     @torch.no_grad()
-    def sample(self, cond, batch_size=16, return_intermediates=False, x_T=None, \
+    def sample(self, cond, batch_size=16, return_intermediates=False, x_T=None,
                verbose=True, timesteps=None, mask=None, x0=None, shape=None, **kwargs):
         if shape is None:
             shape = (batch_size, self.channels, self.temporal_length, *self.image_size)
         if cond is not None:
             if isinstance(cond, dict):
                 cond = {key: cond[key][:batch_size] if not isinstance(cond[key], list) else
-                list(map(lambda x: x[:batch_size], cond[key])) for key in cond}
+                        list(map(lambda x: x[:batch_size], cond[key])) for key in cond}
             else:
                 cond = [c[:batch_size] for c in cond] if isinstance(cond, list) else cond[:batch_size]
         return self.p_sample_loop(cond,
@@ -1009,26 +1011,28 @@ class LatentDiffusion(DDPM):
             scheduler = instantiate_from_config(self.scheduler_config)
             scheduler.start_step = self.global_step
             lr_scheduler = {
-                            'scheduler': LambdaLR(optimizer, lr_lambda=scheduler.schedule),
-                            'interval': interval,
-                            'frequency': frequency
+                'scheduler': LambdaLR(optimizer, lr_lambda=scheduler.schedule),
+                'interval': interval,
+                'frequency': frequency
             }
         elif scheduler_name == "CosineAnnealingLRScheduler":
             scheduler = instantiate_from_config(self.scheduler_config)
             decay_steps = scheduler.decay_steps
             last_step = -1 if self.global_step == 0 else scheduler.start_step
             lr_scheduler = {
-                            'scheduler': CosineAnnealingLR(optimizer, T_max=decay_steps, last_epoch=last_step),
-                            'interval': interval,
-                            'frequency': frequency
+                'scheduler': CosineAnnealingLR(optimizer, T_max=decay_steps, last_epoch=last_step),
+                'interval': interval,
+                'frequency': frequency
             }
         else:
             raise NotImplementedError
         return lr_scheduler
 
 # fa
+
+
 class LatentVisualDiffusion(LatentDiffusion):
-    def __init__(self, img_cond_stage_config, image_proj_stage_config, freeze_embedder=True, image_proj_model_trainable=True,fix_temporal=False, *args, **kwargs):
+    def __init__(self, img_cond_stage_config, image_proj_stage_config, freeze_embedder=True, image_proj_model_trainable=True, fix_temporal=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.image_proj_model_trainable = image_proj_model_trainable
         self._init_embedder(img_cond_stage_config, freeze_embedder)
@@ -1056,52 +1060,52 @@ class LatentVisualDiffusion(LatentDiffusion):
         kwargs.update({"fs": fs.long()})
         loss, loss_dict = self(x, c, **kwargs)
         return loss, loss_dict
-    
+
     def get_batch_input(self, batch, random_uncond, return_first_stage_outputs=False, return_original_cond=False, return_fs=False, return_cond_frame=False, return_original_input=False, **kwargs):
-        ## x: b c t h w
+        # x: b c t h w
         x = super().get_input(batch, self.first_stage_key)
-        ## encode video frames x to z via a 2D encoder        
+        # encode video frames x to z via a 2D encoder
         z = self.encode_first_stage(x)
-        
-        ## get caption condition
+
+        # get caption condition
         cond_input = batch[self.cond_stage_key]
 
         if isinstance(cond_input, dict) or isinstance(cond_input, list):
             cond_emb = self.get_learned_conditioning(cond_input)
         else:
             cond_emb = self.get_learned_conditioning(cond_input.to(self.device))
-                
+
         cond = {}
-        ## to support classifier-free guidance, randomly drop out only text conditioning 5%, only image conditioning 5%, and both 5%.
+        # to support classifier-free guidance, randomly drop out only text conditioning 5%, only image conditioning 5%, and both 5%.
         if random_uncond:
             random_num = torch.rand(x.size(0), device=x.device)
         else:
-            random_num = torch.ones(x.size(0), device=x.device)  ## by doning so, we can get text embedding and complete img emb for inference
+            random_num = torch.ones(x.size(0), device=x.device)  # by doning so, we can get text embedding and complete img emb for inference
         prompt_mask = rearrange(random_num < 2 * self.uncond_prob, "n -> n 1 1")
         input_mask = 1 - rearrange((random_num >= self.uncond_prob).float() * (random_num < 3 * self.uncond_prob).float(), "n -> n 1 1 1")
 
         null_prompt = self.get_learned_conditioning([""])
         prompt_imb = torch.where(prompt_mask, null_prompt, cond_emb.detach())
 
-        ## get conditioning frame
+        # get conditioning frame
         cond_frame_index = 0
         if self.rand_cond_frame:
-            cond_frame_index = random.randint(0, self.model.diffusion_model.temporal_length-1)
+            cond_frame_index = random.randint(0, self.model.diffusion_model.temporal_length - 1)
 
-        img = x[:,:,cond_frame_index,...]
+        img = x[:, :, cond_frame_index, ...]
         img = input_mask * img
-        ## img: b c h w
-        img_emb = self.embedder(img) ## b l c
+        # img: b c h w
+        img_emb = self.embedder(img)  # b l c
         img_emb = self.image_proj_model(img_emb)
 
         if self.model.conditioning_key == 'hybrid':
-            ## simply repeat the cond_frame to match the seq_len of z
-            img_cat_cond = z[:,:,cond_frame_index,:,:]
+            # simply repeat the cond_frame to match the seq_len of z
+            img_cat_cond = z[:, :, cond_frame_index, :, :]
             img_cat_cond = img_cat_cond.unsqueeze(2)
             img_cat_cond = repeat(img_cat_cond, 'b c t h w -> b c (repeat t) h w', repeat=z.shape[2])
 
-            cond["c_concat"] = [img_cat_cond] # b c t h w
-        cond["c_crossattn"] = [torch.cat([prompt_imb, img_emb], dim=1)] ## concat in the seq_len dim
+            cond["c_concat"] = [img_cat_cond]  # b c t h w
+        cond["c_crossattn"] = [torch.cat([prompt_imb, img_emb], dim=1)]  # concat in the seq_len dim
 
         out = [z, cond]
         if return_first_stage_outputs:
@@ -1117,30 +1121,30 @@ class LatentVisualDiffusion(LatentDiffusion):
                 fs = super().get_input(batch, 'fps')
             out.append(fs)
         if return_cond_frame:
-            out.append(x[:,:,cond_frame_index,...].unsqueeze(2))
+            out.append(x[:, :, cond_frame_index, ...].unsqueeze(2))
         if return_original_input:
             out.append(x)
 
         return out
 
     @torch.no_grad()
-    def log_images(self, batch, sample=True, ddim_steps=50, ddim_eta=1., plot_denoise_rows=False, \
-                    unconditional_guidance_scale=1.0, mask=None, **kwargs):
+    def log_images(self, batch, sample=True, ddim_steps=50, ddim_eta=1., plot_denoise_rows=False,
+                   unconditional_guidance_scale=1.0, mask=None, **kwargs):
         """ log images for LatentVisualDiffusion """
-        ##### sampled_img_num: control sampled imgae for logging, larger value may cause OOM
+        # sampled_img_num: control sampled imgae for logging, larger value may cause OOM
         sampled_img_num = 1
         for key in batch.keys():
             batch[key] = batch[key][:sampled_img_num]
 
-        ## TBD: currently, classifier_free_guidance sampling is only supported by DDIM
+        # TBD: currently, classifier_free_guidance sampling is only supported by DDIM
         use_ddim = ddim_steps is not None
         log = dict()
 
         z, c, xrec, xc, fs, cond_x = self.get_batch_input(batch, random_uncond=False,
-                                                return_first_stage_outputs=True,
-                                                return_original_cond=True,
-                                                return_fs=True,
-                                                return_cond_frame=True)
+                                                          return_first_stage_outputs=True,
+                                                          return_original_cond=True,
+                                                          return_fs=True,
+                                                          return_cond_frame=True)
 
         N = xrec.shape[0]
         log["image_condition"] = cond_x
@@ -1167,14 +1171,14 @@ class LatentVisualDiffusion(LatentDiffusion):
                     uc_prompt = self.get_learned_conditioning(prompts)
                 elif self.uncond_type == "zero_embed":
                     uc_prompt = torch.zeros_like(c_emb)
-                
-                img = torch.zeros_like(xrec[:,:,0]) ## b c h w
-                ## img: b c h w
-                img_emb = self.embedder(img) ## b l c
+
+                img = torch.zeros_like(xrec[:, :, 0])  # b c h w
+                # img: b c h w
+                img_emb = self.embedder(img)  # b l c
                 uc_img = self.image_proj_model(img_emb)
 
                 uc = torch.cat([uc_prompt, uc_img], dim=1)
-                ## hybrid case
+                # hybrid case
                 if isinstance(c, dict):
                     uc_hybrid = {"c_concat": [c_cat], "c_crossattn": [uc]}
                     uc = uc_hybrid
@@ -1183,12 +1187,12 @@ class LatentVisualDiffusion(LatentDiffusion):
 
             with self.ema_scope("Plotting"):
                 samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
-                                                         ddim_steps=ddim_steps,eta=ddim_eta,
+                                                         ddim_steps=ddim_steps, eta=ddim_eta,
                                                          unconditional_guidance_scale=unconditional_guidance_scale,
                                                          unconditional_conditioning=uc, x0=z, **kwargs)
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
-            
+
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
                 log["denoise_row"] = denoise_grid
@@ -1215,7 +1219,7 @@ class LatentVisualDiffusion(LatentDiffusion):
                 else:
                     params.append(p)
             mainlogger.info(f"@Training [{len(params)}] Paramters w/o temporal.")
-            
+
         else:
             params = list(self.model.parameters())
             mainlogger.info(f"@Training [{len(params)}] Full Paramters.")
@@ -1224,10 +1228,10 @@ class LatentVisualDiffusion(LatentDiffusion):
             params_cond_stage = [p for p in self.cond_stage_model.parameters() if p.requires_grad == True]
             mainlogger.info(f"@Training [{len(params_cond_stage)}] Paramters for Cond_stage_model.")
             params.extend(params_cond_stage)
-        
+
         if self.image_proj_model_trainable:
             mainlogger.info(f"@Training [{len(list(self.image_proj_model.parameters()))}] Paramters for Image_proj_model.")
-            params.extend(list(self.image_proj_model.parameters()))   
+            params.extend(list(self.image_proj_model.parameters()))
 
         if self.learn_logvar:
             mainlogger.info('Diffusion model optimizing logvar')
@@ -1236,30 +1240,31 @@ class LatentVisualDiffusion(LatentDiffusion):
             else:
                 params.append(self.logvar)
 
-        ## optimizer
+        # optimizer
         optimizer = torch.optim.AdamW(params, lr=lr)
 
-        ## lr scheduler
+        # lr scheduler
         if self.use_scheduler:
             mainlogger.info("Setting up scheduler...")
             lr_scheduler = self.configure_schedulers(optimizer)
             return [optimizer], [lr_scheduler]
-        
+
         return optimizer
 
+
 class VIPLatentDiffusion(LatentVisualDiffusion):
-    def get_batch_input(self, batch, random_uncond, return_first_stage_outputs=False, return_original_cond=False, return_fs=False, return_cond_frame=False, return_cond_frames=False,**kwargs):
-        ## x: b c t h w
+    def get_batch_input(self, batch, random_uncond, return_first_stage_outputs=False, return_original_cond=False, return_fs=False, return_cond_frame=False, return_cond_frames=False, **kwargs):
+        # x: b c t h w
         x = super().get_input(batch, self.first_stage_key)
-        ## encode video frames x to z via a 2D encoder        
+        # encode video frames x to z via a 2D encoder
         z = self.encode_first_stage(x)
         x_cond = super().get_input(batch, 'video_cond')
         z_cond = self.encode_first_stage(x_cond)
-        ## get caption condition
+        # get caption condition
         cond_key = self.cond_stage_key
         cond_input = batch[cond_key]
 
-        ## handle conditions
+        # handle conditions
         # if random_uncond and self.uncond_type == 'empty_seq':
         #     for i, ci in enumerate(cond):
         #         if random.random() < self.uncond_prob:
@@ -1268,7 +1273,7 @@ class VIPLatentDiffusion(LatentVisualDiffusion):
             cond_emb = self.get_learned_conditioning(cond_input)
         else:
             cond_emb = self.get_learned_conditioning(cond_input.to(self.device))
-                
+
         cond = {}
 
         # To support classifier-free guidance, randomly drop out only text conditioning 5%, only image conditioning 5%, and both 5%.
@@ -1276,25 +1281,25 @@ class VIPLatentDiffusion(LatentVisualDiffusion):
             random_num = torch.rand(x.size(0), device=x.device)
         else:
             # random_num = torch.zeros(x.size(0), device=x.device) ## by doning so, we can get all null text embedding and complete img emb for inference
-            random_num = torch.ones(x.size(0), device=x.device)  ## by doning so, we can get text embedding and complete img emb for inference
+            random_num = torch.ones(x.size(0), device=x.device)  # by doning so, we can get text embedding and complete img emb for inference
         prompt_mask = rearrange(random_num < 2 * self.uncond_prob, "n -> n 1 1")
         input_mask = 1 - rearrange((random_num >= self.uncond_prob).float() * (random_num < 3 * self.uncond_prob).float(), "n -> n 1 1 1")
 
         null_prompt = self.get_learned_conditioning([""])
         prompt_imb = torch.where(prompt_mask, null_prompt, cond_emb.detach())
 
-        ## all frames as conditioning embedding
+        # all frames as conditioning embedding
         cond_frame_index = super().get_input(batch, 'frameid').tolist()
         # print(cond_frame_index, type(cond_frame_index[0]))
         img_list = []
         for i, idx in enumerate(cond_frame_index):
-            img = x[i:i+1,:,int(idx),...]
+            img = x[i:i + 1, :, int(idx), ...]
             img_list.append(img)
         img = torch.cat(img_list, dim=0)
         ##
         img = input_mask * img
-        ## img: b c h w
-        img_emb = self.embedder(img) ## b l c
+        # img: b c h w
+        img_emb = self.embedder(img)  # b l c
         img_emb = self.image_proj_model(img_emb)
 
         if self.model.conditioning_key == 'hybrid':
@@ -1303,18 +1308,15 @@ class VIPLatentDiffusion(LatentVisualDiffusion):
             #     img_cat_cond[:,:,0,:,:] = z[:,:,0,:,:]
             #     img_cat_cond[:,:,-1,:,:] = z[:,:,-1,:,:]
 
-
             img_cat_cond = z_cond
 
-            ##### repeat single frame
+            # repeat single frame
             # img_cat_cond = z[:,:,cond_frame_index,:,:]
             # img_cat_cond = img_cat_cond.unsqueeze(2)
             # img_cat_cond = repeat(img_cat_cond, 'b c t h w -> b c (repeat t) h w', repeat=z.shape[2])
 
-
-            cond["c_concat"] = [img_cat_cond] # b c t h w
-        cond["c_crossattn"] = [torch.cat([prompt_imb, img_emb], dim=1)] ## concat in the seq_len dim
-
+            cond["c_concat"] = [img_cat_cond]  # b c t h w
+        cond["c_crossattn"] = [torch.cat([prompt_imb, img_emb], dim=1)]  # concat in the seq_len dim
 
         out = [z, cond]
         if return_first_stage_outputs:
@@ -1337,12 +1339,11 @@ class VIPLatentDiffusion(LatentVisualDiffusion):
             out.extend([x_cond])
         return out
 
-
     @torch.no_grad()
-    def log_images(self, batch, sample=True, ddim_steps=50, ddim_eta=1., plot_denoise_rows=False, \
-                    unconditional_guidance_scale=1.0, mask=None, **kwargs):
+    def log_images(self, batch, sample=True, ddim_steps=50, ddim_eta=1., plot_denoise_rows=False,
+                   unconditional_guidance_scale=1.0, mask=None, **kwargs):
         """ log images for LatentDiffusion """
-        ##### can just sample 1 imgae for 320x512 or 256x448 resolution
+        # can just sample 1 imgae for 320x512 or 256x448 resolution
         batch['video'] = batch['video'][:1]
         batch['video_cond'] = batch['video_cond'][:1]
         batch['caption'] = batch['caption'][:1]
@@ -1351,15 +1352,15 @@ class VIPLatentDiffusion(LatentVisualDiffusion):
         batch['frameid'] = batch['frameid'][:1]
         # import pdb
         # pdb.set_trace()
-        ## TBD: currently, classifier_free_guidance sampling is only supported by DDIM
+        # TBD: currently, classifier_free_guidance sampling is only supported by DDIM
         use_ddim = ddim_steps is not None
         log = dict()
 
         z, c, x, xc, fs, cond_x, x_cond = self.get_batch_input(batch, random_uncond=False,
-                                                return_first_stage_outputs=True,
-                                                return_original_cond=True,return_fs=True,
-                                                return_cond_frame=True,
-                                                return_cond_frames=True)
+                                                               return_first_stage_outputs=True,
+                                                               return_original_cond=True, return_fs=True,
+                                                               return_cond_frame=True,
+                                                               return_cond_frames=True)
 
         N = x.shape[0]
         log["inputs"] = x
@@ -1389,14 +1390,14 @@ class VIPLatentDiffusion(LatentVisualDiffusion):
                     uc_prompt = self.get_learned_conditioning(prompts)
                 elif self.uncond_type == "zero_embed":
                     uc_prompt = torch.zeros_like(c_emb)
-                
-                img = torch.zeros_like(x[:,:,0]) ## b c h w
-                ## img: b c h w
-                img_emb = self.embedder(img) ## b l c
+
+                img = torch.zeros_like(x[:, :, 0])  # b c h w
+                # img: b c h w
+                img_emb = self.embedder(img)  # b l c
                 uc_img = self.image_proj_model(img_emb)
 
                 uc = torch.cat([uc_prompt, uc_img], dim=1)
-                ## hybrid case
+                # hybrid case
                 if isinstance(c, dict):
                     uc_hybrid = {"c_concat": [c_cat], "c_crossattn": [uc]}
                     uc = uc_hybrid
@@ -1405,17 +1406,18 @@ class VIPLatentDiffusion(LatentVisualDiffusion):
 
             with self.ema_scope("Plotting"):
                 samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
-                                                         ddim_steps=ddim_steps,eta=ddim_eta,
+                                                         ddim_steps=ddim_steps, eta=ddim_eta,
                                                          unconditional_guidance_scale=unconditional_guidance_scale,
                                                          unconditional_conditioning=uc, x0=z, **kwargs)
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
-            
+
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
                 log["denoise_row"] = denoise_grid
 
         return log
+
 
 class DiffusionWrapper(pl.LightningModule):
     def __init__(self, diff_model_config, conditioning_key):
@@ -1435,9 +1437,9 @@ class DiffusionWrapper(pl.LightningModule):
             cc = torch.cat(c_crossattn, 1)
             out = self.diffusion_model(x, t, context=cc, **kwargs)
         elif self.conditioning_key == 'hybrid':
-            # import pdb 
+            # import pdb
             # pdb.set_trace()
-            ## it is just right [b,c,t,h,w]: concatenate in channel dim
+            # it is just right [b,c,t,h,w]: concatenate in channel dim
             xc = torch.cat([x] + c_concat, dim=1)
             cc = torch.cat(c_crossattn, 1)
             out = self.diffusion_model(xc, t, context=cc, **kwargs)
@@ -1475,7 +1477,7 @@ class DiffusionWrapper(pl.LightningModule):
             else:
                 xc = x
             out = self.diffusion_model(xc, t, context=cc, y=s, mask=mask)
-        elif self.conditioning_key == 'hybrid-time-adm': # adm means y, e.g., class index
+        elif self.conditioning_key == 'hybrid-time-adm':  # adm means y, e.g., class index
             # assert s is not None
             assert c_adm is not None
             xc = torch.cat([x] + c_concat, dim=1)
@@ -1489,4 +1491,3 @@ class DiffusionWrapper(pl.LightningModule):
             raise NotImplementedError()
 
         return out
-

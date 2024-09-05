@@ -8,11 +8,15 @@ import torch
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from torchvision import transforms
-#import torchvision.transforms._transforms_video as transforms_video
+# import torchvision.transforms._transforms_video as transforms_video
+
+
 def string_not_contains_any(substrings, target_string):
     return not any(substring in target_string for substring in substrings)
 
-word = ['digital', 'Digital', 'DIGITAL', 'concept', 'Concept', 'CONCEPT', 'abstract', 'Abstract', 'ABSTRACT', 'particle', 'Particle', 'PARTICLE', 'loop', 'Loop','LOOP']
+
+word = ['digital', 'Digital', 'DIGITAL', 'concept', 'Concept', 'CONCEPT', 'abstract', 'Abstract', 'ABSTRACT', 'particle', 'Particle', 'PARTICLE', 'loop', 'Loop', 'LOOP']
+
 
 class WebVid(Dataset):
     """
@@ -26,6 +30,7 @@ class WebVid(Dataset):
                 5000.mp4
             ...
     """
+
     def __init__(self,
                  meta_path,
                  data_dir,
@@ -65,22 +70,22 @@ class WebVid(Dataset):
             elif spatial_transform == "center_crop":
                 self.spatial_transform = transforms.Compose([
                     transforms.CenterCrop(resolution),
-                    ])            
+                ])
             elif spatial_transform == "resize_center_crop":
                 # assert(self.resolution[0] == self.resolution[1])
                 self.spatial_transform = transforms.Compose([
                     transforms.Resize(min(self.resolution)),
                     transforms.CenterCrop(self.resolution),
-                    ])
+                ])
             elif spatial_transform == "resize":
                 self.spatial_transform = transforms.Compose([
                     transforms.Resize((self.resolution)),
-                    ])
+                ])
             else:
                 raise NotImplementedError
         else:
             self.spatial_transform = None
-                
+
     def _load_metadata(self):
         metadata = pd.read_csv(self.meta_path)
         print('Loaded: ', len(metadata))
@@ -94,7 +99,7 @@ class WebVid(Dataset):
         full_video_fp = os.path.join(self.data_dir, sample['oripath'][1:] if sample['oripath'][0] == '/' else sample['oripath'])
         cond_full_video_fp = os.path.join(self.data_dir, sample['videopath'][1:] if sample['videopath'][0] == '/' else sample['videopath'])
         return full_video_fp, cond_full_video_fp
-    
+
     def __getitem__(self, index):
         ##
         if self.random_fs:
@@ -102,12 +107,12 @@ class WebVid(Dataset):
         else:
             frame_stride = self.frame_stride
 
-        ## get frames until success
+        # get frames until success
         while True:
             index = index % len(self.metadata)
             sample = self.metadata.iloc[index]
             video_path, cond_video_path = self._get_video_path(sample)
-            #video_path = "/apdcephfs/share_1290939/0_public_datasets/WebVid/videos/002001_002050/1023214570.mp4"
+            # video_path = "/apdcephfs/share_1290939/0_public_datasets/WebVid/videos/002001_002050/1023214570.mp4"
             caption = sample['caption']
             frameid = int(sample['frameid'])
             try:
@@ -127,13 +132,12 @@ class WebVid(Dataset):
                 index += 1
                 print(f"Load video failed! path = {video_path}")
                 continue
-            
+
             frame_stride = 1
-            
+
             start_idx = 0
 
-
-            frame_indices = [start_idx + frame_stride*i for i in range(self.video_length)]
+            frame_indices = [start_idx + frame_stride * i for i in range(self.video_length)]
             try:
                 frames = video_reader.get_batch(frame_indices)
                 frames_cond = cond_video_reader.get_batch(frame_indices)
@@ -142,13 +146,12 @@ class WebVid(Dataset):
                 print(f"Get frames failed! path = {video_path}")
                 index += 1
                 continue
-        
-        ## process data
-        assert(frames.shape[0] == self.video_length),f'{len(frames)}, self.video_length={self.video_length}'
-        assert(frames_cond.shape[0] == self.video_length),f'{len(frames_cond)}, self.video_length={self.video_length}'
-        frames = torch.tensor(frames.asnumpy()).permute(3, 0, 1, 2).float() # [t,h,w,c] -> [c,t,h,w]
-        frames_cond = torch.tensor(frames_cond.asnumpy()).permute(3, 0, 1, 2).float() # [t,h,w,c] -> [c,t,h,w]
-        
+
+        # process data
+        assert (frames.shape[0] == self.video_length), f'{len(frames)}, self.video_length={self.video_length}'
+        assert (frames_cond.shape[0] == self.video_length), f'{len(frames_cond)}, self.video_length={self.video_length}'
+        frames = torch.tensor(frames.asnumpy()).permute(3, 0, 1, 2).float()  # [t,h,w,c] -> [c,t,h,w]
+        frames_cond = torch.tensor(frames_cond.asnumpy()).permute(3, 0, 1, 2).float()  # [t,h,w,c] -> [c,t,h,w]
 
         if self.spatial_transform is not None:
             frames = self.spatial_transform(frames)
@@ -159,9 +162,9 @@ class WebVid(Dataset):
         frames = (frames / 255 - 0.5) * 2
         frames_cond = (frames_cond / 255 - 0.5) * 2
 
-        frames_cond[:,frameid,:,:] = frames[:,frameid,:,:]
+        frames_cond[:, frameid, :, :] = frames[:, frameid, :, :]
         data = {'video': frames, 'caption': caption, 'path': video_path, 'fps': 10, 'frame_stride': frame_stride, 'video_cond': frames_cond, 'frameid': frameid}
         return data
-    
+
     def __len__(self):
         return len(self.metadata)

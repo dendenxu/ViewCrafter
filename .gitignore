@@ -1,0 +1,6 @@
+__pycache__
+checkpoints
+*.so
+build
+*tmp
+*temp

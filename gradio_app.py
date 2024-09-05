@@ -88,4 +88,4 @@ if __name__ == "__main__":
     viewcrafter_iface = viewcrafter_demo(opts)
     viewcrafter_iface.queue(max_size=1)
     # viewcrafter_iface.launch(max_threads=1)
-    viewcrafter_iface.launch(server_name='127.0.0.1', server_port=80, max_threads=1,debug=False)
+    viewcrafter_iface.launch(server_name='0.0.0.0', server_port=15633, max_threads=1,debug=False)

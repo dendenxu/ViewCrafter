@@ -441,6 +441,9 @@ def txt_interpolation(input_list,n,mode = 'smooth'):
     if mode == 'smooth':
         f = UnivariateSpline(x, input_list, k=3)
     elif mode == 'linear':
+        from easyvolcap.utils.console_utils import log
+        log(x)
+        log(input_list)
         f = interp1d(x, input_list)
     else:
         raise KeyError(f"Invalid txt interpolation mode: {mode}")

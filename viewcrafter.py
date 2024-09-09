@@ -1,29 +1,34 @@
-from utils.diffusion_utils import instantiate_from_config, load_model_checkpoint, image_guided_synthesis
-import cv2
-from pathlib import Path
-from pytorch_lightning import seed_everything
-from omegaconf import OmegaConf
-from utils.pvd_utils import *
-import torchvision.transforms as transforms
-import torch.nn.functional as F
-from torchvision.utils import save_image
-from pytorch3d.structures import Pointclouds
-import pytorch3d
-from PIL import Image
-import copy
 import os
-import torchvision
-import numpy as np
+import sys
+import cv2
+import copy
 import torch
 import trimesh
+import pytorch3d
+import numpy as np
+import torchvision
+import torch.nn.functional as F
+import torchvision.transforms as transforms
+
+from PIL import Image
+from pathlib import Path
+from omegaconf import OmegaConf
+from torchvision.utils import save_image
+from pytorch_lightning import seed_everything
+from pytorch3d.structures import Pointclouds
+
+# fmt: off
+sys.path.append('./extern/dust3r')
+
 from dust3r.utils.device import to_numpy
 from dust3r.cloud_opt import global_aligner, GlobalAlignerMode
 from dust3r.image_pairs import make_pairs
 from dust3r.utils.image import load_images
 from dust3r.inference import inference, load_model
-import sys
-sys.path.append('./extern/dust3r')
+# fmt: on
 
+from utils.pvd_utils import *
+from utils.diffusion_utils import instantiate_from_config, load_model_checkpoint, image_guided_synthesis
 
 class ViewCrafter:
     def __init__(self, opts, gradio=False):
